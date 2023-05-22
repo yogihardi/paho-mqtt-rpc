@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -25,25 +26,27 @@ type Handler struct {
 }
 
 type HandlerInput struct {
-	Client         *paho.Client
-	ClientID       *string
+	Server         string
+	Username       *string
+	Password       *string
 	RequestTimeout time.Duration
 }
 
 func NewHandler(ctx context.Context, in HandlerInput) (*Handler, error) {
+	mqttClient, err := mqttConnect(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+
 	h := &Handler{
-		c:              in.Client,
+		c:              mqttClient,
 		correlData:     make(map[string]chan *paho.Publish),
 		requestTimeout: in.RequestTimeout,
 	}
 
-	if in.ClientID != nil {
-		h.c.ClientID = *in.ClientID
-	}
-
 	h.c.Router.RegisterHandler(fmt.Sprintf("%s/responses", h.c.ClientID), h.responseHandler)
 
-	_, err := h.c.Subscribe(ctx, &paho.Subscribe{
+	_, err = h.c.Subscribe(ctx, &paho.Subscribe{
 		Subscriptions: map[string]paho.SubscribeOptions{
 			fmt.Sprintf("%s/responses", h.c.ClientID): {QoS: 1},
 		},
@@ -53,6 +56,41 @@ func NewHandler(ctx context.Context, in HandlerInput) (*Handler, error) {
 	}
 
 	return h, nil
+}
+
+func mqttConnect(ctx context.Context, in HandlerInput) (*paho.Client, error) {
+	conn, err := net.Dial("tcp", in.Server)
+	if err != nil {
+		return nil, err
+	}
+
+	clientID := uuid.NewString()
+	c := paho.NewClient(paho.ClientConfig{
+		ClientID: clientID,
+		Conn:     conn,
+	})
+	cp := &paho.Connect{
+		KeepAlive:  30,
+		CleanStart: true,
+		ClientID:   clientID,
+	}
+	if in.Username != nil {
+		cp.UsernameFlag = true
+		cp.Username = *in.Username
+	}
+	if in.Password != nil {
+		cp.PasswordFlag = true
+		cp.Password = []byte(*in.Password)
+	}
+	ca, err := c.Connect(ctx, cp)
+	if err != nil {
+		return nil, err
+	}
+	if ca.ReasonCode != 0 {
+		return nil, fmt.Errorf("failed to connect to %s : %d - %s", in.Server, ca.ReasonCode, ca.Properties.ReasonString)
+	}
+
+	return c, nil
 }
 
 func (h *Handler) addCorrelID(cID string, r chan *paho.Publish) {
